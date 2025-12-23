@@ -23,6 +23,24 @@ The assistant used the search tool because:
 3. This is a straightforward search that doesn't require multiple steps
 """.strip()
 
+POSITIVE_EXAMPLE_SEARCH_AND_EXPLAIN = """
+User: What's causing our most frequent error?
+Assistant: I'll search for the most frequent error and then explain what's causing it.
+*Creates todo list with the following items:*
+1. Search for the most frequent error tracking issue
+2. Explain the root cause and provide solutions
+*Uses search_error_tracking_issues with orderBy: "occurrences" and limit: 1*
+After getting the issue, the assistant uses explain_error_tracking_issue with the issue_id to analyze the stack trace and provide a detailed explanation.
+""".strip()
+
+POSITIVE_EXAMPLE_SEARCH_AND_EXPLAIN_REASONING = """
+The assistant used the todo list because:
+1. The user wants to understand the root cause, not just see a list
+2. This requires two steps: first find the issue, then explain it
+3. The explain_error_tracking_issue tool needs an issue_id from the search results
+4. Breaking this into steps ensures the assistant gets the issue_id before explaining
+""".strip()
+
 
 class ErrorTrackingAgentToolkit(AgentToolkit):
     POSITIVE_TODO_EXAMPLES = [
@@ -30,13 +48,18 @@ class ErrorTrackingAgentToolkit(AgentToolkit):
             example=POSITIVE_EXAMPLE_SEARCH_ERRORS,
             reasoning=POSITIVE_EXAMPLE_SEARCH_ERRORS_REASONING,
         ),
+        TodoWriteExample(
+            example=POSITIVE_EXAMPLE_SEARCH_AND_EXPLAIN,
+            reasoning=POSITIVE_EXAMPLE_SEARCH_AND_EXPLAIN_REASONING,
+        ),
     ]
 
     @property
     def tools(self) -> list[type["MaxTool"]]:
+        from products.error_tracking.backend.tools.explain_issue import ExplainErrorTrackingIssueTool
         from products.error_tracking.backend.tools.search_issues import SearchErrorTrackingIssuesTool
 
-        tools: list[type[MaxTool]] = [SearchErrorTrackingIssuesTool]
+        tools: list[type[MaxTool]] = [SearchErrorTrackingIssuesTool, ExplainErrorTrackingIssueTool]
         return tools
 
 

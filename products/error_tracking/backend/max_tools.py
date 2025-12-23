@@ -13,6 +13,7 @@ from posthog.schema import (
 )
 
 from posthog.models import Team, User
+from posthog.sync import database_sync_to_async
 
 from ee.hogai.chat_agent.schema_generator.parsers import PydanticOutputParserException
 from ee.hogai.chat_agent.taxonomy.agent import TaxonomyAgent
@@ -25,7 +26,6 @@ from ee.hogai.llm import MaxChatOpenAI
 from ee.hogai.tool import MaxTool
 
 from .prompts import (
-    ERROR_TRACKING_EXPLAIN_ISSUE_PROMPT,
     ERROR_TRACKING_FILTER_INITIAL_PROMPT,
     ERROR_TRACKING_FILTER_PROPERTIES_PROMPT,
     ERROR_TRACKING_ISSUE_IMPACT_DESCRIPTION_PROMPT,
@@ -35,6 +35,7 @@ from .prompts import (
     ERROR_TRACKING_SYSTEM_PROMPT,
     PREFER_FILTERS_PROMPT,
 )
+from .tools.issue_explainer import IssueExplainer
 
 
 class UpdateIssueQueryArgs(BaseModel):
@@ -212,65 +213,36 @@ class ErrorTrackingIssueImpactTool(MaxTool):
         return content, events
 
 
-class ErrorTrackingExplainIssueOutput(BaseModel):
-    """Structured output for issue explanation"""
-
-    generic_description: str = Field(description="A comprehensive technical explanation of the root cause")
-    specific_problem: str = Field(description="A detailed summary of exactly how the issue occurs")
-    possible_resolutions: list[str] = Field(
-        description="A list of potential solutions or mitigations to the issue", max_length=3
-    )
-
-
 class ErrorTrackingExplainIssueTool(MaxTool):
     name: str = "error_tracking_explain_issue"
     description: str = "Given the stack trace and context of an error tracking issue, provide a summary of the problem and potential resolutions."
+    context_prompt_template: str = "Issue ID: {issue_id}, Name: {issue_name}"
 
     async def _arun_impl(self) -> tuple[str, dict[str, Any]]:
         validated_context = ErrorTrackingExplainIssueToolContext(**self.context)
+        issue_id = validated_context.issue_id
 
-        analyzed_issue = await self._analyze_issue(validated_context)
-        formatted_explanation = self._format_explanation_for_user(analyzed_issue, validated_context.issue_name)
+        explainer = IssueExplainer(team=self._team, user=self._user)
+
+        issue = await database_sync_to_async(explainer.get_issue, thread_sensitive=False)(issue_id)
+        if issue is None:
+            return f"Issue with ID '{issue_id}' not found.", {}
+
+        first_event = await database_sync_to_async(explainer.get_first_event, thread_sensitive=False)(issue_id)
+        if first_event is None:
+            return f"No events found for issue '{issue.name or issue_id}'. Cannot analyze without stack trace data.", {}
+
+        stacktrace = explainer.format_stacktrace(first_event)
+        if not stacktrace:
+            return (
+                f"No stack trace available for issue '{issue.name or issue_id}'. Cannot analyze without stack trace data.",
+                {},
+            )
+
+        issue_name = validated_context.issue_name or issue.name or issue_id
+        analyzed_issue = await explainer.analyze_issue(stacktrace)
+        formatted_explanation = explainer.format_explanation(analyzed_issue, issue_name)
 
         user_message = f"Return this content to the user as is, following this format.\n\n{formatted_explanation}"
 
         return user_message, {}
-
-    async def _analyze_issue(self, context: ErrorTrackingExplainIssueToolContext) -> ErrorTrackingExplainIssueOutput:
-        """Analyze an error tracking issue and generate a summary."""
-        stacktrace = self.context.get("stacktrace")
-
-        if not stacktrace:
-            raise ValueError(f"No stacktrace provided")
-
-        formatted_prompt = ERROR_TRACKING_EXPLAIN_ISSUE_PROMPT.replace("{{{stacktrace}}}", stacktrace)
-
-        llm = MaxChatOpenAI(
-            user=self._user,
-            team=self._team,
-            model="gpt-4.1",
-            temperature=0.1,
-            inject_context=False,
-        ).with_structured_output(ErrorTrackingExplainIssueOutput)
-
-        analysis_result = await llm.ainvoke([{"role": "system", "content": formatted_prompt}])
-
-        # Ensure we return the proper type
-        if isinstance(analysis_result, dict):
-            return ErrorTrackingExplainIssueOutput(**analysis_result)
-        return analysis_result
-
-    def _format_explanation_for_user(self, summary: ErrorTrackingExplainIssueOutput, issue_name: str) -> str:
-        lines = []
-        lines.append(f"### Issue: {issue_name}")
-
-        lines.append(summary.generic_description)
-
-        lines.append("\n#### What's happening?")
-        lines.append(summary.specific_problem)
-
-        lines.append("\n#### How to fix it:")
-        for i, option in enumerate(summary.possible_resolutions, 1):
-            lines.append(f"{i}. {option}")
-
-        return "\n".join(lines)

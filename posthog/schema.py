@@ -297,6 +297,7 @@ class AssistantTool(StrEnum):
     SEARCH_ERROR_TRACKING_ISSUES = "search_error_tracking_issues"
     FIND_ERROR_TRACKING_IMPACTFUL_ISSUE_EVENT_LIST = "find_error_tracking_impactful_issue_event_list"
     ERROR_TRACKING_EXPLAIN_ISSUE = "error_tracking_explain_issue"
+    EXPLAIN_ERROR_TRACKING_ISSUE = "explain_error_tracking_issue"
     EXPERIMENT_RESULTS_SUMMARY = "experiment_results_summary"
     CREATE_SURVEY = "create_survey"
     ANALYZE_SURVEY_RESPONSES = "analyze_survey_responses"
@@ -1196,8 +1197,8 @@ class ErrorTrackingExplainIssueToolContext(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    issue_name: str
-    stacktrace: str
+    issue_id: str
+    issue_name: str | None = None
 
 
 class FirstEvent(BaseModel):

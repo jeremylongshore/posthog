@@ -368,6 +368,7 @@ export type AssistantTool =
     | 'search_error_tracking_issues'
     | 'find_error_tracking_impactful_issue_event_list'
     | 'error_tracking_explain_issue'
+    | 'explain_error_tracking_issue'
     | 'experiment_results_summary'
     | 'create_survey'
     | 'analyze_survey_responses'

@@ -12,25 +12,33 @@ import { TabsPrimitive, TabsPrimitiveList, TabsPrimitiveTrigger } from 'lib/ui/T
 import { ErrorTrackingRelationalIssue } from '~/queries/schema/schema-general'
 
 import { releasePreviewLogic } from '../ExceptionAttributesPreview/ReleasesPreview/releasePreviewLogic'
+import { useErrorTrackingExplainIssueMaxTool } from '../ExplainIssueTool'
 import { PropertiesTab } from './Tabs/PropertiesTab'
 import { SessionTab } from './Tabs/SessionTab'
 import { StackTraceTab } from './Tabs/StackTraceTab'
 import { exceptionCardLogic } from './exceptionCardLogic'
 
 interface ExceptionCardContentProps {
+    issueId: ErrorTrackingRelationalIssue['id']
+    issueName: ErrorTrackingRelationalIssue['name']
     timestamp?: string
     label?: JSX.Element
 
     renderStackTraceActions?: () => JSX.Element | null
 }
 
-export interface ExceptionCardProps extends Omit<ExceptionCardContentProps, 'timestamp' | 'issueId'> {
-    issueId: ErrorTrackingRelationalIssue['id']
+export interface ExceptionCardProps extends Omit<ExceptionCardContentProps, 'timestamp'> {
     event?: ErrorEventType
     loading: boolean
 }
 
-export function ExceptionCard({ issueId, event, loading, ...contentProps }: ExceptionCardProps): JSX.Element {
+export function ExceptionCard({
+    issueId,
+    issueName,
+    event,
+    loading,
+    ...contentProps
+}: ExceptionCardProps): JSX.Element {
     const cardLogicProps = useMemo(() => ({ issueId }), [issueId])
     const { setLoading } = useActions(exceptionCardLogic(cardLogicProps))
 
@@ -52,16 +60,31 @@ export function ExceptionCard({ issueId, event, loading, ...contentProps }: Exce
         <BindLogic logic={exceptionCardLogic} props={cardLogicProps}>
             <BindLogic logic={errorPropertiesLogic} props={eventProps}>
                 <BindLogic logic={releasePreviewLogic} props={eventProps}>
-                    <ExceptionCardContent timestamp={event?.timestamp} {...contentProps} />
+                    <ExceptionCardContent
+                        issueId={issueId}
+                        issueName={issueName}
+                        timestamp={event?.timestamp}
+                        {...contentProps}
+                    />
                 </BindLogic>
             </BindLogic>
         </BindLogic>
     )
 }
 
-function ExceptionCardContent({ timestamp, renderStackTraceActions, label }: ExceptionCardContentProps): JSX.Element {
+function ExceptionCardContent({
+    issueId,
+    issueName,
+    timestamp,
+    renderStackTraceActions,
+    label,
+}: ExceptionCardContentProps): JSX.Element {
     const { currentTab } = useValues(exceptionCardLogic)
     const { setCurrentTab } = useActions(exceptionCardLogic)
+
+    // Register Max AI tool context for the issue - this allows users to ask Max
+    // to explain the issue from any page context (not just via the Explain button)
+    useErrorTrackingExplainIssueMaxTool(issueId, issueName)
 
     return (
         <LemonCard hoverEffect={false} className="p-0 relative overflow-y-auto w-full border-0 rounded-none">

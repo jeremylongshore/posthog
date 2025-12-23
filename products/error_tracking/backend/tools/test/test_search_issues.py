@@ -284,6 +284,7 @@ class TestSearchErrorTrackingIssuesToolFormatting(NonAtomicBaseTest):
     async def test_format_issue_with_all_fields(self):
         tool = await self._create_tool()
         issue = {
+            "id": "01234567-89ab-cdef-0123-456789abcdef",
             "name": "TypeError: Cannot read 'undefined'",
             "status": "active",
             "first_seen": "2025-01-10T10:00:00Z",
@@ -298,6 +299,7 @@ class TestSearchErrorTrackingIssuesToolFormatting(NonAtomicBaseTest):
         result = tool._format_issue(1, issue)
 
         self.assertIn("1. TypeError: Cannot read 'undefined'", result)
+        self.assertIn("ID: 01234567-89ab-cdef-0123-456789abcdef", result)
         self.assertIn("Status: active", result)
         self.assertIn("Occurrences: 150", result)
         self.assertIn("Users: 25", result)
@@ -308,12 +310,14 @@ class TestSearchErrorTrackingIssuesToolFormatting(NonAtomicBaseTest):
     async def test_format_issue_with_minimal_fields(self):
         tool = await self._create_tool()
         issue = {
+            "id": "abcd1234-5678-90ab-cdef-1234567890ab",
             "status": "active",
         }
 
         result = tool._format_issue(1, issue)
 
         self.assertIn("1. Unnamed issue", result)
+        self.assertIn("ID: abcd1234-5678-90ab-cdef-1234567890ab", result)
         self.assertIn("Status: active", result)
 
     async def test_format_results_empty(self):
