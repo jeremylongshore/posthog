@@ -38,6 +38,7 @@ class AgentMode(StrEnum):
     PRODUCT_ANALYTICS = "product_analytics"
     SQL = "sql"
     SESSION_REPLAY = "session_replay"
+    ERROR_TRACKING = "error_tracking"
 
 
 class AggregationAxisFormat(StrEnum):
@@ -293,6 +294,7 @@ class AssistantTool(StrEnum):
     CREATE_HOG_FUNCTION_INPUTS = "create_hog_function_inputs"
     CREATE_MESSAGE_TEMPLATE = "create_message_template"
     FILTER_ERROR_TRACKING_ISSUES = "filter_error_tracking_issues"
+    SEARCH_ERROR_TRACKING_ISSUES = "search_error_tracking_issues"
     FIND_ERROR_TRACKING_IMPACTFUL_ISSUE_EVENT_LIST = "find_error_tracking_impactful_issue_event_list"
     ERROR_TRACKING_EXPLAIN_ISSUE = "error_tracking_explain_issue"
     EXPERIMENT_RESULTS_SUMMARY = "experiment_results_summary"

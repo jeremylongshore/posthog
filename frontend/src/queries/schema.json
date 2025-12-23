@@ -353,7 +353,7 @@
             "type": "object"
         },
         "AgentMode": {
-            "enum": ["product_analytics", "sql", "session_replay"],
+            "enum": ["product_analytics", "sql", "session_replay", "error_tracking"],
             "type": "string"
         },
         "AggregationAxisFormat": {
@@ -1895,6 +1895,7 @@
                 "create_hog_function_inputs",
                 "create_message_template",
                 "filter_error_tracking_issues",
+                "search_error_tracking_issues",
                 "find_error_tracking_impactful_issue_event_list",
                 "error_tracking_explain_issue",
                 "experiment_results_summary",
