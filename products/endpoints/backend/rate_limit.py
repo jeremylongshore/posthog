@@ -76,6 +76,7 @@ def _check_and_cache_materialization_status(team_id: int, endpoint_name: str) ->
         set_endpoint_materialization_ready(team_id, endpoint_name, is_ready)
         return is_ready
     except Endpoint.DoesNotExist:
+        set_endpoint_materialization_ready(team_id, endpoint_name, False)
         return False
 
 
@@ -90,7 +91,7 @@ def _is_materialized_endpoint_request(request, view) -> bool:
     if cached_status is None:
         return _check_and_cache_materialization_status(team_id, endpoint_name)
 
-    return cached_status is True
+    return cached_status
 
 
 class EndpointBurstThrottle(APIQueriesBurstThrottle):
