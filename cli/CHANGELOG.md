@@ -1,5 +1,9 @@
 # posthog-cli
 
+# 0.5.21
+
+- feat: add experimental commands for endpoints management
+
 # 0.5.20
 
 - chore: add global `--rate-limit` option for Posthog client
