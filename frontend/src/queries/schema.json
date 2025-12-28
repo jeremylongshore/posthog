@@ -26387,7 +26387,6 @@
                 "force_async",
                 "force_blocking",
                 "force_cache",
-                "force_inline",
                 "lazy_async"
             ],
             "type": "string"
