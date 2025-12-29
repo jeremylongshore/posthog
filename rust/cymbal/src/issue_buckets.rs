@@ -1,4 +1,4 @@
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use common_redis::Client;
 use std::collections::HashMap;
 use tracing::warn;
@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 const ISSUE_BUCKET_TTL_SECONDS: usize = 60 * 60;
 const ISSUE_BUCKET_INTERVAL_MINUTES: i64 = 5;
+const SPIKE_MULTIPLIER: f64 = 10.0;
+const NUM_BUCKETS: usize = 12;
 
 fn round_datetime_to_minutes(datetime: DateTime<Utc>, minutes: i64) -> DateTime<Utc> {
     assert!(minutes > 0, "minutes must be > 0");
@@ -50,10 +52,73 @@ pub(crate) async fn try_increment_issue_buckets(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SpikingIssue {
+    pub issue_id: Uuid,
+    pub computed_baseline: f64,
+    pub current_bucket_value: i64,
+}
+
+pub async fn get_spiking_issues(
+    redis: &(dyn Client + Send + Sync),
+    issue_ids: Vec<Uuid>,
+) -> Result<Vec<SpikingIssue>, common_redis::CustomRedisError> {
+    if issue_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let now = Utc::now();
+    let bucket_timestamps: Vec<String> = (0..NUM_BUCKETS)
+        .map(|i| {
+            let offset = Duration::minutes(ISSUE_BUCKET_INTERVAL_MINUTES * i as i64);
+            get_rounded_to_minutes(now - offset, ISSUE_BUCKET_INTERVAL_MINUTES)
+        })
+        .collect();
+
+    let keys: Vec<String> = issue_ids
+        .iter()
+        .flat_map(|issue_id| {
+            bucket_timestamps
+                .iter()
+                .map(move |ts| format!("issue-buckets:{issue_id}-{ts}"))
+        })
+        .collect();
+
+    let values = redis.mget(keys).await?;
+
+    let mut spiking = Vec::new();
+
+    for (issue_idx, issue_id) in issue_ids.iter().enumerate() {
+        let start_idx = issue_idx * NUM_BUCKETS;
+        let issue_values = &values[start_idx..start_idx + NUM_BUCKETS];
+
+        let sum: i64 = issue_values.iter().filter_map(|v| *v).sum();
+        let computed_baseline = sum as f64 / NUM_BUCKETS as f64;
+        let current_bucket_value = issue_values[0].unwrap_or(0);
+
+        let is_spiking = if computed_baseline == 0.0 {
+            current_bucket_value > 0
+        } else {
+            current_bucket_value as f64 > computed_baseline * SPIKE_MULTIPLIER
+        };
+
+        if is_spiking {
+            spiking.push(SpikingIssue {
+                issue_id: *issue_id,
+                computed_baseline,
+                current_bucket_value,
+            });
+        }
+    }
+
+    Ok(spiking)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use common_redis::MockRedisClient;
 
     #[test]
     fn test_get_rounded_to_minutes_floor_rounding() {
@@ -80,5 +145,72 @@ mod tests {
             get_rounded_to_minutes(dt, 12),
             "2025-12-16T12:24:00Z".to_string()
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_spiking_issues_empty() {
+        let redis = MockRedisClient::new();
+        let result = get_spiking_issues(&redis, vec![]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_spiking_issues_detects_spike() {
+        let mut redis = MockRedisClient::new();
+        let issue_id = Uuid::new_v4();
+
+        let now = Utc::now();
+        for i in 0..NUM_BUCKETS {
+            let offset = Duration::minutes(ISSUE_BUCKET_INTERVAL_MINUTES * i as i64);
+            let ts = get_rounded_to_minutes(now - offset, ISSUE_BUCKET_INTERVAL_MINUTES);
+            let key = format!("issue-buckets:{issue_id}-{ts}");
+
+            let value = if i == 0 { Some(100) } else { Some(1) };
+            redis.mget_ret(&key, value);
+        }
+
+        let result = get_spiking_issues(&redis, vec![issue_id]).await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].issue_id, issue_id);
+        assert!((result[0].computed_baseline - (100.0 + 11.0) / 12.0).abs() < 0.01);
+        assert_eq!(result[0].current_bucket_value, 100);
+    }
+
+    #[tokio::test]
+    async fn test_get_spiking_issues_no_spike() {
+        let mut redis = MockRedisClient::new();
+        let issue_id = Uuid::new_v4();
+
+        let now = Utc::now();
+        for i in 0..NUM_BUCKETS {
+            let offset = Duration::minutes(ISSUE_BUCKET_INTERVAL_MINUTES * i as i64);
+            let ts = get_rounded_to_minutes(now - offset, ISSUE_BUCKET_INTERVAL_MINUTES);
+            let key = format!("issue-buckets:{issue_id}-{ts}");
+            redis.mget_ret(&key, Some(10));
+        }
+
+        let result = get_spiking_issues(&redis, vec![issue_id]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_spiking_issues_zero_baseline() {
+        let mut redis = MockRedisClient::new();
+        let issue_id = Uuid::new_v4();
+
+        let now = Utc::now();
+        for i in 0..NUM_BUCKETS {
+            let offset = Duration::minutes(ISSUE_BUCKET_INTERVAL_MINUTES * i as i64);
+            let ts = get_rounded_to_minutes(now - offset, ISSUE_BUCKET_INTERVAL_MINUTES);
+            let key = format!("issue-buckets:{issue_id}-{ts}");
+            let value = if i == 0 { Some(1) } else { None };
+            redis.mget_ret(&key, value);
+        }
+
+        let result = get_spiking_issues(&redis, vec![issue_id]).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].issue_id, issue_id);
+        assert_eq!(result[0].current_bucket_value, 1);
     }
 }

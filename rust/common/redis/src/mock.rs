@@ -109,11 +109,6 @@ impl MockRedisClient {
         self.clone()
     }
 
-    pub fn batch_incr_by_expire_ret(&mut self, ret: Result<(), CustomRedisError>) -> Self {
-        self.batch_incr_by_expire_ret = Some(ret);
-        self.clone()
-    }
-
     pub fn mget_ret(&mut self, key: &str, ret: Option<i64>) -> Self {
         self.mget_ret.insert(key.to_owned(), ret);
         self.clone()
