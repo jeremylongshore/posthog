@@ -14,7 +14,7 @@ from dateutil.relativedelta import relativedelta
 from langchain_core.runnables import RunnableConfig
 from parameterized import parameterized
 
-from posthog.schema import DateRange, ErrorTrackingQuery
+from posthog.schema import DateRange, ErrorTrackingQuery, MaxErrorTrackingFilters
 
 from products.error_tracking.backend.models import ErrorTrackingIssue, ErrorTrackingIssueFingerprintV2
 from products.error_tracking.backend.tools.search_issues import SearchErrorTrackingIssuesTool
@@ -147,45 +147,50 @@ class TestSearchErrorTrackingIssuesTool(ClickhouseTestMixin, NonAtomicBaseTest):
         tool = await self._create_tool()
         query = self._create_query(search_query="nonexistent_error_xyz")
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         self.assertIn("No issues found", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.search_query, "nonexistent_error_xyz")
+        self.assertFalse(filters.has_more)
 
     async def test_returns_active_issues_by_default(self):
         tool = await self._create_tool()
         query = self._create_query(status="active")
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         self.assertIn("Found 2 issues", result_text)
         self.assertIn("TypeError", result_text)
         self.assertIn("ReferenceError", result_text)
         self.assertNotIn("SyntaxError", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.status, "active")
 
     async def test_returns_resolved_issues_when_filtered(self):
         tool = await self._create_tool()
         query = self._create_query(status="resolved")
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         self.assertIn("Found 1 issue", result_text)
         self.assertIn("SyntaxError", result_text)
         self.assertNotIn("TypeError", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.status, "resolved")
 
     async def test_returns_all_issues_when_status_all(self):
         tool = await self._create_tool()
         query = self._create_query(status="all")
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         self.assertIn("Found 3 issues", result_text)
         self.assertIn("TypeError", result_text)
         self.assertIn("ReferenceError", result_text)
         self.assertIn("SyntaxError", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.status, "all")
 
     @patch("ee.hogai.context.insight.query_executor.process_query_dict")
     async def test_search_query_filters_by_text(self, mock_process_query):
@@ -202,11 +207,12 @@ class TestSearchErrorTrackingIssuesTool(ClickhouseTestMixin, NonAtomicBaseTest):
         tool = await self._create_tool()
         query = self._create_query(status="all", search_query="TypeError")
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         self.assertIn("Found 1 issue", result_text)
         self.assertIn("TypeError", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.search_query, "TypeError")
         # Verify search query was passed
         call_args = mock_process_query.call_args
         query_dict = call_args[0][1]
@@ -224,47 +230,98 @@ class TestSearchErrorTrackingIssuesTool(ClickhouseTestMixin, NonAtomicBaseTest):
         tool = await self._create_tool()
         query = self._create_query(status="all", limit=2)
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         self.assertIn("Found 2 issues", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.limit, 2)
+        self.assertTrue(filters.has_more)
+        self.assertIsNotNone(filters.next_cursor)
+        # Cursor should be offset 0 + limit 2 = "2"
+        self.assertEqual(filters.next_cursor, "2")
         # Verify limit was passed to the query
         call_args = mock_process_query.call_args
         query_dict = call_args[0][1]
         self.assertEqual(query_dict["limit"], 2)
 
+    @patch("ee.hogai.context.insight.query_executor.process_query_dict")
+    async def test_cursor_pagination_returns_next_page(self, mock_process_query):
+        # First call returns 2 results (at limit), second call returns 1 result
+        mock_process_query.side_effect = [
+            {
+                "results": [
+                    {
+                        "name": "Error 1",
+                        "status": "active",
+                        "aggregations": {"occurrences": 1, "users": 1, "sessions": 0},
+                    },
+                    {
+                        "name": "Error 2",
+                        "status": "active",
+                        "aggregations": {"occurrences": 2, "users": 1, "sessions": 0},
+                    },
+                ]
+            },
+            {
+                "results": [
+                    {
+                        "name": "Error 3",
+                        "status": "active",
+                        "aggregations": {"occurrences": 3, "users": 1, "sessions": 0},
+                    },
+                ]
+            },
+        ]
+
+        tool = await self._create_tool()
+        query = self._create_query(status="all", limit=2)
+
+        # First page
+        result_text_1, filters_1 = await tool._arun_impl(query=query)
+        self.assertIn("Found 2 issues", result_text_1)
+        self.assertTrue(filters_1.has_more)
+        self.assertEqual(filters_1.next_cursor, "2")
+
+        # Second page using cursor
+        result_text_2, filters_2 = await tool._arun_impl(query=query, cursor=filters_1.next_cursor)
+        self.assertIn("Found 1 issue", result_text_2)
+        self.assertFalse(filters_2.has_more)
+        self.assertIsNone(filters_2.next_cursor)
+
     async def test_formats_issue_with_aggregations(self):
         tool = await self._create_tool()
         query = self._create_query(status="active")
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         self.assertIn("Status:", result_text)
         self.assertIn("Occurrences:", result_text)
         self.assertIn("Users:", result_text)
         self.assertIn("Sessions:", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
 
     async def test_limits_excessive_limit_to_100(self):
         tool = await self._create_tool()
         query = self._create_query(status="all", limit=500)
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         # Should cap at 100, but since we only have 3 issues, should return 3
         self.assertIn("Found 3 issues", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.limit, 100)
 
     async def test_defaults_to_25_when_no_limit(self):
         tool = await self._create_tool()
         query = self._create_query(status="all")
         query.limit = None  # Explicitly set to None
 
-        result_text, artifact = await tool._arun_impl(query=query)
+        result_text, filters = await tool._arun_impl(query=query)
 
         # Should default to 25, but since we only have 3 issues, should return 3
         self.assertIn("Found 3 issues", result_text)
-        self.assertIsNone(artifact)
+        self.assertIsInstance(filters, MaxErrorTrackingFilters)
+        self.assertEqual(filters.limit, 25)
 
 
 class TestSearchErrorTrackingIssuesToolFormatting(NonAtomicBaseTest):
@@ -323,34 +380,28 @@ class TestSearchErrorTrackingIssuesToolFormatting(NonAtomicBaseTest):
     async def test_format_results_empty(self):
         tool = await self._create_tool()
 
-        result = tool._format_results({"results": []})
+        result = tool._format_results([])
 
         self.assertIn("No issues found", result)
 
     async def test_format_results_single(self):
         tool = await self._create_tool()
 
-        response = {
-            "results": [
-                {"name": "Error", "status": "active", "aggregations": {"occurrences": 1, "users": 1, "sessions": 0}}
-            ]
-        }
+        results = [{"name": "Error", "status": "active", "aggregations": {"occurrences": 1, "users": 1, "sessions": 0}}]
 
-        result = tool._format_results(response)
+        result = tool._format_results(results)
 
         self.assertIn("Found 1 issue", result)
 
     async def test_format_results_multiple(self):
         tool = await self._create_tool()
 
-        response = {
-            "results": [
-                {"name": "Error 1", "status": "active", "aggregations": {"occurrences": 1, "users": 1, "sessions": 0}},
-                {"name": "Error 2", "status": "active", "aggregations": {"occurrences": 2, "users": 2, "sessions": 1}},
-            ]
-        }
+        results = [
+            {"name": "Error 1", "status": "active", "aggregations": {"occurrences": 1, "users": 1, "sessions": 0}},
+            {"name": "Error 2", "status": "active", "aggregations": {"occurrences": 2, "users": 2, "sessions": 1}},
+        ]
 
-        result = tool._format_results(response)
+        result = tool._format_results(results)
 
         self.assertIn("Found 2 issues", result)
         self.assertIn("1. Error 1", result)
@@ -359,24 +410,33 @@ class TestSearchErrorTrackingIssuesToolFormatting(NonAtomicBaseTest):
     async def test_format_results_limits_to_10(self):
         tool = await self._create_tool()
 
-        response = {
-            "results": [
-                {
-                    "name": f"Error {i}",
-                    "status": "active",
-                    "aggregations": {"occurrences": i, "users": i, "sessions": 0},
-                }
-                for i in range(15)
-            ]
-        }
+        results = [
+            {
+                "name": f"Error {i}",
+                "status": "active",
+                "aggregations": {"occurrences": i, "users": i, "sessions": 0},
+            }
+            for i in range(15)
+        ]
 
-        result = tool._format_results(response)
+        result = tool._format_results(results)
 
         self.assertIn("Found 15 issues", result)
-        self.assertIn("...and 5 more issues", result)
+        self.assertIn("...and 5 more issues in this batch", result)
         self.assertIn("1. Error 0", result)
         self.assertIn("10. Error 9", result)
         self.assertNotIn("11.", result)
+
+    async def test_format_results_with_pagination(self):
+        tool = await self._create_tool()
+
+        results = [
+            {"name": "Error 1", "status": "active", "aggregations": {"occurrences": 1, "users": 1, "sessions": 0}},
+        ]
+
+        result = tool._format_results(results, has_more=True)
+
+        self.assertIn("More issues are available", result)
 
     @parameterized.expand(
         [
