@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use common_redis::Client;
 use std::collections::HashMap;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 const ISSUE_BUCKET_TTL_SECONDS: usize = 60 * 60;
@@ -17,17 +17,17 @@ fn round_datetime_to_minutes(datetime: DateTime<Utc>, minutes: i64) -> DateTime<
     DateTime::<Utc>::from_timestamp(rounded_ts, 0).expect("rounded timestamp is always valid")
 }
 
-pub(crate) fn get_rounded_to_minutes(datetime: DateTime<Utc>, minutes: i64) -> String {
+fn get_rounded_to_minutes(datetime: DateTime<Utc>, minutes: i64) -> String {
     round_datetime_to_minutes(datetime, minutes).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-pub fn get_now_rounded_to_minutes(minutes: i64) -> String {
+fn get_now_rounded_to_minutes(minutes: i64) -> String {
     get_rounded_to_minutes(Utc::now(), minutes)
 }
 
-pub(crate) async fn try_increment_issue_buckets(
+async fn try_increment_issue_buckets(
     redis: &(dyn Client + Send + Sync),
-    issue_counts: HashMap<Uuid, u32>,
+    issue_counts: &HashMap<Uuid, u32>,
 ) {
     if issue_counts.is_empty() {
         return;
@@ -35,11 +35,11 @@ pub(crate) async fn try_increment_issue_buckets(
 
     let now_rounded_to_minutes = get_now_rounded_to_minutes(ISSUE_BUCKET_INTERVAL_MINUTES);
     let items: Vec<(String, i64)> = issue_counts
-        .into_iter()
+        .iter()
         .map(|(issue_id, count)| {
             (
                 format!("issue-buckets:{issue_id}-{now_rounded_to_minutes}"),
-                count as i64,
+                *count as i64,
             )
         })
         .collect();
@@ -52,6 +52,34 @@ pub(crate) async fn try_increment_issue_buckets(
     }
 }
 
+pub async fn do_spike_detection(
+    redis: &(dyn Client + Send + Sync),
+    issue_counts: HashMap<Uuid, u32>,
+) {
+    if issue_counts.is_empty() {
+        return;
+    }
+
+    try_increment_issue_buckets(redis, &issue_counts).await;
+
+    let issue_ids: Vec<Uuid> = issue_counts.keys().copied().collect();
+    match get_spiking_issues(redis, issue_ids).await {
+        Ok(spiking) => {
+            for spike in spiking {
+                info!(
+                    issue_id = %spike.issue_id,
+                    baseline = spike.computed_baseline,
+                    current = spike.current_bucket_value,
+                    "Spike detected"
+                );
+            }
+        }
+        Err(err) => {
+            warn!("Failed to detect spikes: {err}");
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SpikingIssue {
     pub issue_id: Uuid,
@@ -59,7 +87,7 @@ pub struct SpikingIssue {
     pub current_bucket_value: i64,
 }
 
-pub async fn get_spiking_issues(
+async fn get_spiking_issues(
     redis: &(dyn Client + Send + Sync),
     issue_ids: Vec<Uuid>,
 ) -> Result<Vec<SpikingIssue>, common_redis::CustomRedisError> {
@@ -214,3 +242,4 @@ mod tests {
         assert_eq!(result[0].current_bucket_value, 1);
     }
 }
+

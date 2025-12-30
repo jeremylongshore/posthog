@@ -9,12 +9,12 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 pub mod issue_processing;
+pub mod spike_detection;
 pub mod stack_processing;
 
 use crate::{
     app_context::AppContext,
     error::{EventError, PipelineFailure, PipelineResult, UnhandledError},
-    issue_buckets,
     issue_resolution::IssueStatus,
     metric_consts::{
         ISSUE_PROCESSING_TIME, STACK_PROCESSING_TIME, SUPPRESSED_ISSUE_DROPPED_EVENTS,
@@ -87,8 +87,7 @@ pub async fn do_exception_handling(
         *issue_counts.entry(issue.id).or_insert(0) += 1;
     }
 
-    issue_buckets::try_increment_issue_buckets(&*context.issue_buckets_redis_client, issue_counts)
-        .await;
+    spike_detection::do_spike_detection(&*context.issue_buckets_redis_client, issue_counts).await;
 
     Ok(events)
 }
