@@ -139,6 +139,7 @@ class ExternalDataSourceSerializers(serializers.ModelSerializer):
             "source_type",
             "latest_error",
             "prefix",
+            "description",
             "last_run_at",
             "schemas",
             "job_inputs",
@@ -389,6 +390,7 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
 
     def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         prefix = request.data.get("prefix", None)
+        description = request.data.get("description", None)
         source_type = request.data["source_type"]
 
         # Validate prefix characters
@@ -438,6 +440,7 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             source_type=source_type_model,
             job_inputs=source_config.to_dict(),
             prefix=prefix,
+            description=description,
         )
 
         source_schemas = source.get_schemas(source_config, self.team_id)
@@ -733,6 +736,7 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
 class ExternalDataSourceContext(ActivityContextBase):
     source_type: str
     prefix: str | None
+    description: str | None
     created_by_user_id: str | None
     created_by_user_email: str | None
     created_by_user_name: str | None
@@ -756,6 +760,7 @@ def handle_external_data_source_change(
     context = ExternalDataSourceContext(
         source_type=external_data_source.source_type or "",
         prefix=external_data_source.prefix,
+        description=external_data_source.description,
         created_by_user_id=created_by_user_id,
         created_by_user_email=created_by_user_email,
         created_by_user_name=created_by_user_name,
