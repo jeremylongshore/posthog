@@ -72,8 +72,7 @@ class HobbyTester:
         # This key matches posthog-ci-cd registered in DigitalOcean
         self.ssh_private_key = ssh_private_key or os.environ.get("DIGITALOCEAN_SSH_PRIVATE_KEY")
 
-        # Build user_data with SSH pubkey included (only for droplet creation, not test-only runs)
-        # Only build if we don't already have a droplet (i.e., creating a new one)
+        # Only build user_data if we don't already have a droplet (i.e., creating a new one)
         if not droplet_id:
             self.user_data = self._build_user_data()
         else:
@@ -110,7 +109,7 @@ class HobbyTester:
 
     def _build_user_data(self):
         """Build cloud-init user_data script with SSH pubkey in cloud-config"""
-        cloud_config = f"""#cloud-config
+        cloud_config = """#cloud-config
 runcmd:
   - set -e
 """
@@ -270,30 +269,26 @@ runcmd:
             return {"exit_code": -1, "stdout": "", "stderr": f"SSH command failed: {str(e)}"}
 
     def generate_demo_data(self):
-        """Generate demo data on the droplet via SSH"""
+        """Generate demo data on the droplet."""
         if not self.droplet or not self.ssh_private_key:
             print("❌ Cannot generate demo data: missing droplet or SSH key", flush=True)
             return False
 
-        print("🎲 Generating demo data on droplet...", flush=True)
-        print("   This may take a few minutes", flush=True)
+        print("🎲 Generating demo data (this may take a few minutes)...", flush=True)
 
-        cmd = (
-            "cd /hobby && "
-            "sudo -E docker-compose -f docker-compose.yml exec -T web "
-            "python manage.py generate_demo_data"
+        result = self.run_ssh_command(
+            "cd /hobby && sudo -E docker-compose -f docker-compose.yml exec -T web python manage.py generate_demo_data",
+            timeout=600,
         )
 
-        result = self.run_ssh_command(cmd, timeout=600)
-
         if result["exit_code"] == 0:
-            print("✅ Demo data generated successfully", flush=True)
+            print("✅ Demo data generated", flush=True)
             return True
-        else:
-            print(f"❌ Demo data generation failed (exit {result['exit_code']})", flush=True)
-            if result["stderr"]:
-                print(f"   Error: {result['stderr']}", flush=True)
-            return False
+
+        print(f"❌ Demo data generation failed (exit {result['exit_code']})", flush=True)
+        if result["stderr"]:
+            print(f"   Error: {result['stderr']}", flush=True)
+        return False
 
     @staticmethod
     def find_existing_droplet_for_pr(token, pr_number):
@@ -324,11 +319,9 @@ runcmd:
         print(f"🔄 Updating existing deployment to SHA: {new_sha}")
 
         # Update .env file with new image tag
-        update_env_cmd = f"""
-cd /hobby && \
-sed -i 's/^POSTHOG_APP_TAG=.*/POSTHOG_APP_TAG={new_sha}/' .env && \
-grep POSTHOG_APP_TAG .env
-"""
+        update_env_cmd = (
+            f"cd /hobby && sed -i 's/^POSTHOG_APP_TAG=.*/POSTHOG_APP_TAG={new_sha}/' .env && grep POSTHOG_APP_TAG .env"
+        )
         result = self.run_ssh_command(update_env_cmd, timeout=30)
         if result["exit_code"] != 0:
             raise RuntimeError(f"Failed to update .env: {result['stderr']}")
@@ -344,16 +337,14 @@ grep POSTHOG_APP_TAG .env
 
         # Restart services with new images
         print("🔄 Restarting services...")
-        restart_cmd = "cd /hobby && docker-compose up -d"
-        result = self.run_ssh_command(restart_cmd, timeout=300)
+        result = self.run_ssh_command("cd /hobby && docker-compose up -d", timeout=300)
         if result["exit_code"] != 0:
             raise RuntimeError(f"Failed to restart services: {result['stderr']}")
         print("✅ Services restarted")
 
         # Wait a moment for services to stabilize
         print("⏳ Waiting for services to stabilize...")
-        wait_cmd = "sleep 10"
-        self.run_ssh_command(wait_cmd, timeout=15)
+        self.run_ssh_command("sleep 10", timeout=15)
 
         print(f"✅ Deployment updated successfully")
         return True
@@ -374,13 +365,41 @@ grep POSTHOG_APP_TAG .env
             print(f"Could not fetch kernel logs: {e}")
         return None
 
-    def test_deployment(self, timeout=30, retry_interval=15):
+    def check_container_health(self):
+        """Check if all containers are running.
+        Returns: (all_healthy, stopped_containers, all_containers)
+        """
+        import json
+
+        output = self.run_command_on_droplet(
+            "cd hobby && sudo -E docker-compose -f docker-compose.yml ps --format json 2>/dev/null || echo '[]'",
+            timeout=30,
+        )
+
+        if not output or not output.strip():
+            return (False, [], [])
+
+        try:
+            containers = [json.loads(line) for line in output.strip().split("\n") if line and line != "[]"]
+            if not containers:
+                return (False, [], [])
+
+            stopped = [c for c in containers if c.get("State") != "running"]
+            all_healthy = len(stopped) == 0 and len(containers) > 0
+
+            return (all_healthy, stopped, containers)
+        except Exception as e:
+            print(f"  ⚠️  Could not parse container status: {e}", flush=True)
+            return (False, [], [])
+
+    def test_deployment(self, timeout=30, retry_interval=15, stability_period=300):
         if not self.hostname:
             return
-        # timeout in minutes
+        # timeout in minutes, stability_period in seconds
         # return true if success or false if failure
         print("Attempting to reach the instance", flush=True)
         print(f"We will time out after {timeout} minutes", flush=True)
+        print(f"Containers must be stable for {stability_period}s before success", flush=True)
 
         # Suppress SSL warnings for staging Let's Encrypt certificates
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -394,24 +413,36 @@ grep POSTHOG_APP_TAG .env
         connection_error_count = 0
 
         last_log_fetch = 0
+        containers_healthy_since = None  # Track when containers first became healthy
+        cloud_init_finished = False
+
         while datetime.datetime.now() < start_time + datetime.timedelta(minutes=timeout):
             elapsed = (datetime.datetime.now() - start_time).total_seconds()
             if attempt % 10 == 0:
                 print(f"⏱️  Still trying... (attempt {attempt}, elapsed {int(elapsed)}s)", flush=True)
             print(f"Trying to connect... (attempt {attempt})", flush=True)
+
+            # Try health check
+            health_check_passed = False
             try:
                 # Using HTTP directly to avoid DNS/TLS complexity in CI
                 # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http.request-with-http
                 r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    health_check_passed = True
+                else:
+                    if r.status_code == 502:
+                        http_502_count += 1
+                    print(f"Instance not ready (HTTP {r.status_code})", flush=True)
             except Exception as e:
                 last_error = type(e).__name__
                 connection_error_count += 1
                 print(f"Connection failed: {type(e).__name__}", flush=True)
 
-                # Fetch logs periodically (every 60 seconds) to show progress
-                # Also check cloud-init status to fail fast if deployment failed
-                if int(elapsed) - last_log_fetch > 60:
-                    # Check if cloud-init has finished
+            # Periodic checks (every 60 seconds) - runs regardless of connection/HTTP status
+            # Also check cloud-init status to fail fast if deployment failed
+            if int(elapsed) - last_log_fetch > 60:
+                if not cloud_init_finished:
                     finished, success, status = self.check_cloud_init_status()
                     if finished and not success:
                         # Cloud-init failed - stop immediately
@@ -422,89 +453,81 @@ grep POSTHOG_APP_TAG .env
                             if errors:
                                 print(f"   Errors: {errors}", flush=True)
 
-                        # Fetch full logs to show what went wrong
                         print("\n📋 Cloud-init failure logs:", flush=True)
                         logs = self.fetch_cloud_init_logs()
                         if logs:
-                            log_lines = logs.strip().split("\n")[-50:]
-                            for line in log_lines:
+                            for line in logs.strip().split("\n")[-50:]:
                                 print(f"  {line}", flush=True)
 
-                        print(
-                            f"\n📍 For debugging, SSH to: ssh root@{self.droplet.ip_address}",
-                            flush=True,
-                        )
+                        print(f"\n📍 For debugging, SSH to: ssh root@{self.droplet.ip_address}", flush=True)
                         return False
 
-                    # Show progress logs
-                    print("\n📋 Cloud-init progress:", flush=True)
                     if finished and success:
-                        print("  ✅ Cloud-init completed successfully", flush=True)
+                        cloud_init_finished = True
+                        print("\n📋 Cloud-init completed successfully", flush=True)
 
-                        # Check container health now that deployment finished
-                        print("\n🐳 Checking docker container status...", flush=True)
-                        container_status = self.run_command_on_droplet(
-                            "cd hobby && sudo -E docker-compose -f docker-compose.yml ps --format json 2>/dev/null || echo '[]'",
-                            timeout=30,
-                        )
-                        if container_status and container_status.strip():
-                            try:
-                                import json
+                # Check container health periodically once cloud-init is done (for diagnostics/fail-fast)
+                if cloud_init_finished:
+                    print("\n🐳 Checking container health...", flush=True)
+                    all_healthy, stopped, containers = self.check_container_health()
 
-                                containers = [
-                                    json.loads(line)
-                                    for line in container_status.strip().split("\n")
-                                    if line and line != "[]"
-                                ]
-                                if containers:
-                                    running = [c for c in containers if c.get("State") == "running"]
-                                    stopped = [c for c in containers if c.get("State") != "running"]
+                    if containers:
+                        running_count = len(containers) - len(stopped)
+                        print(f"  Running: {running_count}/{len(containers)} containers", flush=True)
 
-                                    print(f"  Running: {len(running)}/{len(containers)} containers", flush=True)
-                                    for c in running:
-                                        print(f"    ✅ {c.get('Service')}", flush=True)
+                    if stopped:
+                        print(f"\n❌ {len(stopped)} container(s) not running!", flush=True)
+                        for c in stopped:
+                            print(f"    ❌ {c.get('Service')}: {c.get('State')}", flush=True)
+                            print(f"   Fetching logs for {c.get('Service')}...", flush=True)
+                            logs_cmd = f"cd hobby && sudo -E docker-compose -f docker-compose.yml logs --tail=50 {c.get('Service')}"
+                            container_logs = self.run_command_on_droplet(logs_cmd, timeout=30)
+                            if container_logs:
+                                print(f"\n   Logs for {c.get('Service')}:", flush=True)
+                                for log_line in container_logs.split("\n")[-30:]:
+                                    print(f"     {log_line}", flush=True)
+                        print(f"\n📍 For debugging, SSH to: ssh root@{self.droplet.ip_address}", flush=True)
+                        return False
 
-                                    if stopped:
-                                        print(f"\n  ❌ {len(stopped)} containers NOT running:", flush=True)
-                                        for c in stopped:
-                                            print(f"    ❌ {c.get('Service')}: {c.get('State')}", flush=True)
-
-                                        # Fail fast if critical containers aren't running
-                                        critical = ["web", "db", "clickhouse", "redis"]
-                                        stopped_critical = [c for c in stopped if c.get("Service") in critical]
-                                        if stopped_critical:
-                                            print(f"\n❌ Critical containers failed to start!", flush=True)
-                                            for c in stopped_critical:
-                                                print(f"   Fetching logs for {c.get('Service')}...", flush=True)
-                                                logs_cmd = f"cd hobby && sudo -E docker-compose -f docker-compose.yml logs --tail=50 {c.get('Service')}"
-                                                container_logs = self.run_command_on_droplet(logs_cmd, timeout=30)
-                                                if container_logs:
-                                                    print(f"\n   Logs for {c.get('Service')}:", flush=True)
-                                                    for log_line in container_logs.split("\n")[-30:]:
-                                                        print(f"     {log_line}", flush=True)
-                                            return False
-                            except Exception as e:
-                                print(f"  ⚠️  Could not parse container status: {e}", flush=True)
-
+                # Show cloud-init progress if still running
+                if not cloud_init_finished:
+                    print("\n📋 Cloud-init progress:", flush=True)
                     logs = self.fetch_cloud_init_logs()
                     if logs:
-                        # Show last 10 lines of cloud-init log
-                        log_lines = logs.strip().split("\n")[-10:]
-                        for line in log_lines:
+                        for line in logs.strip().split("\n")[-10:]:
                             print(f"  {line}", flush=True)
-                        last_log_fetch = int(elapsed)
-                    print()
 
-                time.sleep(retry_interval)
-                attempt += 1
-                continue
-            if r.status_code == 200:
-                elapsed_total = (datetime.datetime.now() - start_time).total_seconds()
-                print(f"✅ Success - received heartbeat from the instance after {int(elapsed_total)}s", flush=True)
-                return True
-            if r.status_code == 502:
-                http_502_count += 1
-            print(f"Instance not ready (HTTP {r.status_code}) - sleeping", flush=True)
+                last_log_fetch = int(elapsed)
+                print()
+
+            # Check for success: health check passed AND containers stable for required period
+            if health_check_passed and cloud_init_finished:
+                # Verify containers are still healthy on every iteration when HTTP passes
+                all_healthy, stopped, _ = self.check_container_health()
+                if not all_healthy:
+                    if containers_healthy_since is not None:
+                        print(f"  ⚠️  Container(s) crashed, resetting stability timer", flush=True)
+                    containers_healthy_since = None
+                elif containers_healthy_since is None:
+                    containers_healthy_since = datetime.datetime.now()
+                    print(f"  ✅ All containers running, starting stability timer", flush=True)
+                else:
+                    stable_for = (datetime.datetime.now() - containers_healthy_since).total_seconds()
+                    if stable_for >= stability_period:
+                        elapsed_total = (datetime.datetime.now() - start_time).total_seconds()
+                        print(
+                            f"✅ Success - health check passed and containers stable for {int(stable_for)}s", flush=True
+                        )
+                        print(f"   Total time: {int(elapsed_total)}s", flush=True)
+                        return True
+                    else:
+                        print(
+                            f"  Health check passed, containers stable for {int(stable_for)}s / {stability_period}s",
+                            flush=True,
+                        )
+            elif health_check_passed:
+                print(f"  Health check passed but cloud-init not yet complete", flush=True)
+
             time.sleep(retry_interval)
             attempt += 1
 
@@ -582,115 +605,82 @@ grep POSTHOG_APP_TAG .env
 
     @staticmethod
     def destroy_environment(droplet_id, record_id, retries=3):
-        print("Destroying the droplet")
+        """Destroy droplet and DNS record with retries."""
         token = os.getenv("DIGITALOCEAN_TOKEN")
         droplet = digitalocean.Droplet(token=token, id=droplet_id)
         domain = digitalocean.Domain(token=token, name=DOMAIN)
 
-        # Attempt to destroy droplet
-        droplet_destroyed = False
-        attempts = 0
-        while attempts <= retries:
-            attempts += 1
-            try:
-                droplet.destroy()
-                droplet_destroyed = True
-                print("✅ Droplet destroyed successfully")
-                break
-            except digitalocean.NotFoundError:
-                # Droplet doesn't exist - cleanup already done
-                droplet_destroyed = True
-                print("✅ Droplet not found (already cleaned up or never created)")
-                break
-            except Exception as e:
-                print(f"⚠️  Attempt {attempts}/{retries + 1} - Could not destroy droplet: {type(e).__name__}")
-                if attempts <= retries:
-                    time.sleep(2)  # Wait before retry
-                else:
-                    print(f"❌ Failed to destroy droplet after {retries + 1} attempts")
+        def destroy_with_retry(name, destroy_fn):
+            for attempt in range(1, retries + 2):
+                try:
+                    destroy_fn()
+                    print(f"✅ {name} destroyed")
+                    return True
+                except digitalocean.NotFoundError:
+                    print(f"✅ {name} not found (already cleaned up)")
+                    return True
+                except Exception as e:
+                    print(f"⚠️  Attempt {attempt}/{retries + 1} - Could not destroy {name}: {type(e).__name__}")
+                    if attempt <= retries:
+                        time.sleep(2)
+            print(f"❌ Failed to destroy {name} after {retries + 1} attempts")
+            return False
 
-        # Attempt to destroy DNS record
-        dns_destroyed = False
+        print("Destroying the droplet")
+        droplet_destroyed = destroy_with_retry("Droplet", droplet.destroy)
+
         print("Destroying the DNS entry")
-        attempts = 0
-        while attempts <= retries:
-            attempts += 1
-            try:
-                domain.delete_domain_record(id=record_id)
-                dns_destroyed = True
-                print("✅ DNS record destroyed successfully")
-                break
-            except digitalocean.NotFoundError:
-                # DNS record doesn't exist - cleanup already done
-                dns_destroyed = True
-                print("✅ DNS record not found (already cleaned up or never created)")
-                break
-            except Exception as e:
-                print(f"⚠️  Attempt {attempts}/{retries + 1} - Could not destroy DNS record: {type(e).__name__}")
-                if attempts <= retries:
-                    time.sleep(2)  # Wait before retry
-                else:
-                    print(f"❌ Failed to destroy DNS record after {retries + 1} attempts")
+        dns_destroyed = destroy_with_retry("DNS record", lambda: domain.delete_domain_record(id=record_id))
 
-        # Fail loudly if either cleanup failed
         if not droplet_destroyed or not dns_destroyed:
-            error_msg = []
+            failed = []
             if not droplet_destroyed:
-                error_msg.append(f"droplet {droplet_id}")
+                failed.append(f"droplet {droplet_id}")
             if not dns_destroyed:
-                error_msg.append(f"DNS record {record_id}")
-            raise Exception(f"⚠️  Failed to destroy {' and '.join(error_msg)} - manual cleanup may be required")
+                failed.append(f"DNS record {record_id}")
+            raise Exception(f"⚠️  Failed to destroy {' and '.join(failed)} - manual cleanup may be required")
 
-        print("\n✅ Cleanup completed successfully")
+        print("\n✅ Cleanup completed")
 
-    def handle_sigint(self):
-        self.destroy_self()
+    @staticmethod
+    def find_dns_record_for_ip(token, ip_address):
+        """Find DNS A record matching the given IP address."""
+        try:
+            domain = digitalocean.Domain(token=token, name=DOMAIN)
+            for record in domain.get_records():
+                if record.type == "A" and record.data == ip_address:
+                    return record.id
+        except Exception as e:
+            print(f"Could not find DNS record: {e}")
+        return None
 
     def run_command_on_droplet(self, command, timeout=60):
-        """Run a command on the droplet via SSH and return stdout"""
+        """Run a command on the droplet via SSH and return stdout, or None on failure."""
         if not self.droplet or not self.ssh_private_key:
             return None
         result = self.run_ssh_command(command, timeout=timeout)
-        if result["exit_code"] == 0:
-            return result["stdout"]
-        return None
+        return result["stdout"] if result["exit_code"] == 0 else None
 
     def fetch_cloud_init_logs(self):
-        """Fetch cloud-init logs via SSH"""
-        if not self.droplet:
-            print("  (no droplet)", flush=True)
-            return None
-        if not self.ssh_private_key:
-            print("  (no SSH key)", flush=True)
-            return None
-
-        result = self.run_ssh_command("cat /var/log/cloud-init-output.log", timeout=30)
-        if result["exit_code"] == 0:
-            return result["stdout"]
-        else:
-            print(f"  (SSH failed: {result['stderr'][:100] if result['stderr'] else 'unknown'})", flush=True)
-            return None
+        """Fetch cloud-init logs via SSH."""
+        return self.run_command_on_droplet("cat /var/log/cloud-init-output.log", timeout=30)
 
     def check_cloud_init_status(self):
-        """Check if cloud-init has finished and whether it succeeded or failed.
-        Returns: tuple of (finished: bool, success: bool, result_json: dict or None)
-        """
-        if not self.droplet:
-            return (False, False, None)
-        if not self.ssh_private_key:
+        """Returns: (finished, success, status_dict)"""
+        import json
+
+        if not self.droplet or not self.ssh_private_key:
             return (False, False, None)
 
         try:
             result = self.run_ssh_command("cloud-init status --format=json", timeout=15)
-            if result["exit_code"] == 0:
-                import json
+            if result["exit_code"] != 0:
+                return (False, False, None)
 
-                status = json.loads(result["stdout"])
-                # status contains: {"status": "done", "errors": [], ...}
-                finished = status.get("status") in ["done", "error"]
-                success = status.get("status") == "done" and len(status.get("errors", [])) == 0
-                return (finished, success, status)
-            return (False, False, None)
+            status = json.loads(result["stdout"])
+            finished = status.get("status") in ["done", "error"]
+            success = status.get("status") == "done" and not status.get("errors")
+            return (finished, success, status)
         except Exception:
             return (False, False, None)
 
@@ -827,13 +817,7 @@ def main():
                     print(f"🧹 Found orphaned preview droplet for PR #{pr_number} - cleaning up", flush=True)
                     print(f"   (label was likely removed)", flush=True)
                     try:
-                        domain = digitalocean.Domain(token=token, name=DOMAIN)
-                        records = domain.get_records()
-                        record_id = None
-                        for record in records:
-                            if record.type == "A" and record.data == orphaned_droplet.ip_address:
-                                record_id = record.id
-                                break
+                        record_id = HobbyTester.find_dns_record_for_ip(token, orphaned_droplet.ip_address)
                         HobbyTester.destroy_environment(droplet_id=orphaned_droplet.id, record_id=record_id)
                         print(f"✅ Cleaned up orphaned droplet", flush=True)
                     except Exception as e:
@@ -1020,16 +1004,8 @@ def main():
             if should_destroy:
                 print(f"   🗑️  Will destroy: {reason}")
                 if not dry_run:
-                    # Find DNS record for this droplet
                     try:
-                        domain = digitalocean.Domain(token=token, name=DOMAIN)
-                        records = domain.get_records()
-                        record_id = None
-                        for record in records:
-                            if record.type == "A" and record.data == droplet.ip_address:
-                                record_id = record.id
-                                break
-
+                        record_id = HobbyTester.find_dns_record_for_ip(token, droplet.ip_address)
                         HobbyTester.destroy_environment(droplet_id=droplet.id, record_id=record_id)
                         cleaned += 1
                         cleaned_prs.append(pr_number)
@@ -1068,16 +1044,8 @@ def main():
 
         print(f"Found droplet: {droplet.name} (ID: {droplet.id})")
 
-        # Find DNS record
         try:
-            domain = digitalocean.Domain(token=token, name=DOMAIN)
-            records = domain.get_records()
-            record_id = None
-            for record in records:
-                if record.type == "A" and record.data == droplet.ip_address:
-                    record_id = record.id
-                    break
-
+            record_id = HobbyTester.find_dns_record_for_ip(token, droplet.ip_address)
             HobbyTester.destroy_environment(droplet_id=droplet.id, record_id=record_id)
             print(f"✅ Destroyed droplet for PR #{pr_number}")
         except Exception as e:
