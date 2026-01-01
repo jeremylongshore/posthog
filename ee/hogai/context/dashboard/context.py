@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from posthog.models import Team
 
 from ee.hogai.context.insight.context import InsightContext
+from ee.hogai.utils.helpers import build_insight_url
 from ee.hogai.utils.prompt import format_prompt_string
 from ee.hogai.utils.types.base import AnyPydanticModelQuery
 
@@ -121,6 +122,7 @@ class DashboardContext:
 
     def _create_insight_context(self, data: DashboardInsightContext) -> InsightContext:
         """Create an InsightContext from DashboardInsightContext model."""
+        insight_url = build_insight_url(self.team, data.short_id) if data.short_id else None
         return InsightContext(
             team=self.team,
             query=data.query,
@@ -128,6 +130,7 @@ class DashboardContext:
             description=data.description,
             insight_id=data.short_id,
             insight_model_id=data.db_id,
+            insight_url=insight_url,
             dashboard_filters=self.dashboard_filters,
             filters_override=data.filters_override,
             variables_override=data.variables_override,

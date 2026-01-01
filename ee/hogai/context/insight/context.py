@@ -30,6 +30,7 @@ class InsightContext:
         description: str | None = None,
         insight_id: str | None = None,
         insight_model_id: int | None = None,
+        insight_url: str | None = None,
         # Optional dashboard filter handling
         dashboard_filters: dict | None = None,
         filters_override: dict | None = None,
@@ -44,6 +45,9 @@ class InsightContext:
         self.dashboard_filters = dashboard_filters
         self.filters_override = filters_override
         self.variables_override = variables_override
+        if not insight_url and insight_model_id:
+            raise ValueError("Insight URL is required when insight model ID is provided.")
+        self.insight_url = insight_url
 
     @classmethod
     def extract_query(cls, insight: Insight):
@@ -89,6 +93,7 @@ class InsightContext:
             query_schema=query_schema,
             results=results,
             include_url_reminder=self.insight_id is None,
+            insight_url=self.insight_url,
         )
 
     async def format_schema(self, prompt_template: str = INSIGHT_RESULT_TEMPLATE) -> str:

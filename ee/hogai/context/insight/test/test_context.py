@@ -21,6 +21,7 @@ class TestInsightContext(BaseTest):
             description="Test Description",
             insight_id="test_id",
             insight_model_id=123,
+            insight_url="http://localhost:8000/insights/abc123",
             dashboard_filters={"date_from": "-7d"},
             filters_override={"date_to": "2025-01-01"},
             variables_override={"var1": {"value": "test"}},
@@ -92,6 +93,7 @@ class TestInsightContext(BaseTest):
             description="Test Description",
             insight_id="test_id",
             insight_model_id=123,
+            insight_url="http://localhost:8000/insights/test_id",
         )
 
         result = await context.execute_and_format()
@@ -203,7 +205,12 @@ class TestInsightContext(BaseTest):
         mock_execute.return_value = "Test Results"
 
         query = AssistantTrendsQuery(series=[AssistantTrendsEventsNode(name="$pageview")])
-        context = InsightContext(team=self.team, query=query, insight_model_id=456)
+        context = InsightContext(
+            team=self.team,
+            query=query,
+            insight_model_id=456,
+            insight_url="http://localhost:8000/insights/abc",
+        )
 
         await context.execute_and_format()
 
@@ -242,3 +249,52 @@ class TestInsightContext(BaseTest):
         effective_query = await context._get_effective_query()
 
         self.assertIsNotNone(effective_query)
+
+    def test_insight_url_raises_error_when_model_id_without_short_id(self):
+        query = AssistantTrendsQuery(series=[AssistantTrendsEventsNode(name="$pageview")])
+
+        with self.assertRaises(ValueError) as exc:
+            InsightContext(
+                team=self.team,
+                query=query,
+                insight_model_id=123,
+            )
+
+        self.assertIn("Insight URL is required when insight model ID is provided", str(exc.exception))
+
+    def test_insight_url_is_none_when_no_url(self):
+        query = AssistantTrendsQuery(series=[AssistantTrendsEventsNode(name="$pageview")])
+        context = InsightContext(team=self.team, query=query)
+
+        self.assertIsNone(context.insight_url)
+
+    @patch("ee.hogai.context.insight.context.execute_and_format_query")
+    async def test_execute_and_format_includes_insight_url(self, mock_execute):
+        mock_execute.return_value = "Test Results"
+
+        query = AssistantTrendsQuery(series=[AssistantTrendsEventsNode(name="$pageview")])
+        context = InsightContext(
+            team=self.team,
+            query=query,
+            name="Test Insight",
+            insight_url="http://localhost:8000/insights/xyz789",
+        )
+
+        result = await context.execute_and_format()
+
+        self.assertIn("http://localhost:8000/insights/xyz789", result)
+
+    @patch("ee.hogai.context.insight.context.execute_and_format_query")
+    async def test_execute_and_format_shows_fallback_when_no_url(self, mock_execute):
+        mock_execute.return_value = "Test Results"
+
+        query = AssistantTrendsQuery(series=[AssistantTrendsEventsNode(name="$pageview")])
+        context = InsightContext(
+            team=self.team,
+            query=query,
+            name="Test Insight",
+        )
+
+        result = await context.execute_and_format()
+
+        self.assertIn("This insight cannot be accessed via a URL.", result)
